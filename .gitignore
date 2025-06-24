@@ -3,3 +3,5 @@ __pycache__/
 hen_ppo_tensorboard/
 *.npz
 *.zip
+.DS_Store
+*/.DS_Store
