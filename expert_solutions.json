@@ -1,0 +1,122 @@
+[
+    {
+        "problem_name": "Optimal Solution for 2H-2C Problem with 2 stages EMAT 3K",
+        "description": "An example expert solution for our stage-wise environment.",
+        "problem_definition": {
+            "streams_filepath": "data/example1/streams.csv",
+            "utilities_filepath": "data/example1/utilities.csv",
+            "matches_cost_filepath": "data/example1/matches_cost.csv",
+            "num_stages": 2,
+            "min_deltaT": 3.0,
+            "cost_parameters": {
+                "hot_utility_cost_rate": 80.0,
+                "cold_utility_cost_rate": 20.0,
+                "exchanger_fixed_cost": 0.0,
+                "exchanger_area_cost_coeff": 1000.0,
+                "exchanger_area_cost_exponent": 0.6
+            }
+        },
+        "expert_action_sequence": [
+            [
+                [103.39794656448451, 2400.0],
+                [1307.5759738716715, 0.0]
+            ],
+            [
+                [796.5653696116711, 0.0],
+                [0.0, 0.0]
+            ]
+        ]
+    },
+    {
+        "problem_name": "Optimal Solution for 2H-2C Problem with 2 stages EMAT 0.0K",
+        "description": "An example expert solution for our stage-wise environment.",
+        "problem_definition": {
+            "streams_filepath": "data/example1/streams.csv",
+            "utilities_filepath": "data/example1/utilities.csv",
+            "matches_cost_filepath": "data/example1/matches_cost.csv",
+            "num_stages": 2,
+            "min_deltaT": 0.0,
+            "cost_parameters": {
+                "hot_utility_cost_rate": 80.0,
+                "cold_utility_cost_rate": 20.0,
+                "exchanger_fixed_cost": 0.0,
+                "exchanger_area_cost_coeff": 1000.0,
+                "exchanger_area_cost_exponent": 0.6
+            }
+        },
+        "expert_action_sequence": [
+            [
+                [271.2, 2400.0],
+                [1400, 0.0]
+            ],
+            [
+                [628.8, 0.0],
+                [0.0, 0.0]
+            ]
+        ]
+    },
+    {
+        "problem_name": "Optimal Solution for 2H-2C Problem with 3 stages EMAT 2.65K (fig 9)",
+        "description": "An example expert solution for our stage-wise environment.",
+        "problem_definition": {
+            "streams_filepath": "data/example1/streams.csv",
+            "utilities_filepath": "data/example1/utilities.csv",
+            "matches_cost_filepath": "data/example1/matches_cost.csv",
+            "num_stages": 3,
+            "min_deltaT": 2.0,
+            "cost_parameters": {
+                "hot_utility_cost_rate": 80.0,
+                "cold_utility_cost_rate": 20.0,
+                "exchanger_fixed_cost": 0.0,
+                "exchanger_area_cost_coeff": 1000.0,
+                "exchanger_area_cost_exponent": 0.6
+            }
+        },
+        "expert_action_sequence": [
+            [
+                [219.6, 0.0],
+                [0.0, 0.0]
+            ],
+            [
+                [0.0, 2400.0],
+                [1400.0, 0.0]
+            ],
+            [
+                [680.4, 0.0],
+                [0.0, 0.0]
+            ]
+        ]
+    },
+    {
+        "problem_name": "Optimal Solution for 2H-2C Problem with 3 stages EMAT 10K",
+        "description": "An example expert solution for our stage-wise environment.",
+        "problem_definition": {
+            "streams_filepath": "data/example1/streams.csv",
+            "utilities_filepath": "data/example1/utilities.csv",
+            "matches_cost_filepath": "data/example1/matches_cost.csv",
+            "num_stages": 3,
+            "min_deltaT": 10.0,
+            "cost_parameters": {
+                "hot_utility_cost_rate": 80.0,
+                "cold_utility_cost_rate": 20.0,
+                "exchanger_fixed_cost": 0.0,
+                "exchanger_area_cost_coeff": 1000.0,
+                "exchanger_area_cost_exponent": 0.6
+            }
+        },
+        "expert_action_sequence": [
+            [
+                [0.0, 2400.0],
+                [900.0, 0.0]
+            ],
+            [
+                [900.0, 0.0],
+                [0.0, 0.0]
+            ],
+            [
+                [0.0, 0.0],
+                [300.0, 0.0]
+            ]
+        ]
+    }
+]

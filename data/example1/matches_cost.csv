@@ -1,0 +1,9 @@
+Hot_Stream,Cold_Stream,Fixed_Cost_Unit,Area_Cost_Coeff,Area_Cost_Exp
+H1,C1,0,1000,0.6
+H1,C2,0,1000,0.6
+H2,C1,0,1000,0.6
+H2,C2,0,1000,0.6
+H1,W1,0,1000,0.6
+H2,W1,0,1000,0.6
+S1,C1,0,1200,0.6
+S1,C2,0,1200,0.6
