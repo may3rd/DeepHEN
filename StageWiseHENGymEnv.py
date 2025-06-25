@@ -7,6 +7,12 @@ import os
 import csv
 
 # ==============================================================================
+#  Helper Functions
+# ==============================================================================
+def calculate_lmtd(dt1: float, dt2: float) -> float:
+    return (dt1 * dt2 * (dt1 + dt2) / 2.0)**(1/3.0)
+
+# ==============================================================================
 #  Updated HENProblem Class with Data Loading from CSV
 # ==============================================================================
 class HENProblem:
@@ -18,7 +24,8 @@ class HENProblem:
         self, 
         streams_filepath: str,
         utilities_filepath: str,
-        matches_cost_filepath: str,
+        matches_cost_filepath: Optional[str] = None,
+        forbidden_matches_filepath: Optional[str] = None, # <-- NEW
         default_u: float = 0.8,
         default_fixed_cost: float = 0.0,
         default_area_coeff: float = 1000.0,
@@ -28,6 +35,7 @@ class HENProblem:
         self.streams_filepath = streams_filepath
         self.utilities_filepath = utilities_filepath
         self.matches_cost_filepath = matches_cost_filepath
+        self.forbidden_matches_filepath = forbidden_matches_filepath # <-- NEW
         
         # Default values
         self.default_u = default_u
@@ -51,6 +59,7 @@ class HENProblem:
         
     def _load_data_from_files(self):
         """Parses all required CSV files and ensures all possible matches have cost data."""
+        # --- Load Streams ---
         hot_streams_list, cold_streams_list = [], []
         with open(self.streams_filepath, 'r', newline='') as f:
             reader = csv.DictReader(f)
@@ -61,23 +70,45 @@ class HENProblem:
         self.hot_streams = np.array(hot_streams_list, dtype=object)
         self.cold_streams = np.array(cold_streams_list, dtype=object)
 
+        # --- Load Utilities ---
         hot_utils_list, cold_utils_list = [], []
         with open(self.utilities_filepath, 'r') as f:
             reader = csv.DictReader(f)
             for row in reader:
-                util_data = {'name': row['Name'], 'tin': float(row['Tin']), 'tout': float(row['Tout']), 'cost': float(row['Cost']), 'h': float(row['h'])}
+                util_data = {
+                    'name': row['Name'],
+                    'tin': float(row['Tin']),
+                    'tout': float(row['Tout']),
+                    'cost': float(row['Cost']),
+                    'h': float(row['h'])
+                    }
                 if row['Type'].lower() == 'hot': hot_utils_list.append(util_data)
                 else: cold_utils_list.append(util_data)
         self.hot_utilities = hot_utils_list
         self.cold_utilities = cold_utils_list
 
+        # --- Load Match-Specific Costs ---
         self.match_costs = {}
-        with open(self.matches_cost_filepath, 'r') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                key = (row['Hot_Stream'], row['Cold_Stream'])
-                self.match_costs[key] = {'fixed_cost': float(row['Fixed_Cost_Unit']), 'area_coeff': float(row['Area_Cost_Coeff']), 'area_exp': float(row['Area_Cost_Exp'])}
+        if self.matches_cost_filepath and os.path.exists(self.matches_cost_filepath):
+            with open(self.matches_cost_filepath, 'r') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    key = (row['Hot_Stream'], row['Cold_Stream'])
+                    self.match_costs[key] = {
+                        'fixed_cost': float(row['Fixed_Cost_Unit']),
+                        'area_coeff': float(row['Area_Cost_Coeff']),
+                        'area_exp': float(row['Area_Cost_Exp'])
+                        }
         
+        # --- NEW: Load Forbidden Matches ---
+        self.forbidden_matches = set()
+        if self.forbidden_matches_filepath and os.path.exists(self.forbidden_matches_filepath):
+            with open(self.forbidden_matches_filepath, 'r', newline='') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    self.forbidden_matches.add((row['Hot_Stream'], row['Cold_Stream']))
+        
+        # --- Populate missing match combinations with default values ---
         hot_stream_ids = self.hot_streams[:, 0]
         cold_stream_ids = self.cold_streams[:, 0]
         hot_utility_ids = [hu['name'] for hu in self.hot_utilities]
@@ -102,7 +133,7 @@ class HENProblem:
 
 
 # ==============================================================================
-#  The Final Stage-Wise Environment
+#  The Final Stage-Wise Environment with Data-Driven Logic
 # ==============================================================================
 class StageWiseHENGymEnv(gym.Env):
     """
@@ -127,8 +158,9 @@ class StageWiseHENGymEnv(gym.Env):
         self.min_deltaT = min_deltaT
         self.tolerance = 1e-3
 
-        # --- UPDATE: Added num_stages to observation size ---
-        obs_size = (self.problem.n_hot + self.problem.n_cold) * 2 + (self.problem.n_hot * self.problem.n_cold) + 1 + 1 
+        # --- UPDATE: Added forbidden match mask to observation size ---
+        obs_size = (self.problem.n_hot + self.problem.n_cold) * 2 + \
+                   (self.problem.n_hot * self.problem.n_cold) * 2 + 1 + 1 # Temps + Duties + Driving Forces + Forbidden Mask + Time + Num Stages
         self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(obs_size,), dtype=np.float32)
 
         action_size = self.problem.n_hot * self.problem.n_cold
@@ -190,12 +222,21 @@ class StageWiseHENGymEnv(gym.Env):
         # --- NEW: Added normalized num_stages feature ---
         norm_num_stages = np.array([self.num_stages / 10.0]) # Normalize by a reasonable max
         
+        # --- NEW: Create and add forbidden match mask ---
+        forbidden_mask = np.zeros((self.problem.n_hot, self.problem.n_cold))
+        hot_ids, cold_ids = self.problem.hot_streams[:, 0], self.problem.cold_streams[:, 0]
+        for i, h_id in enumerate(hot_ids):
+            for j, c_id in enumerate(cold_ids):
+                if (h_id, c_id) in self.problem.forbidden_matches:
+                    forbidden_mask[i, j] = 1.0
+        
         obs = np.concatenate([
-            norm_hot_inlet_temps, 
-            norm_cold_inlet_temps, 
-            norm_hot_duty_rem, 
-            norm_cold_duty_rem, 
+            norm_hot_inlet_temps,
+            norm_cold_inlet_temps,
+            norm_hot_duty_rem,
+            norm_cold_duty_rem,
             norm_driving_forces.flatten(),
+            forbidden_mask.flatten(),
             time_feature,
             norm_num_stages
         ])
@@ -308,6 +349,16 @@ class StageWiseHENGymEnv(gym.Env):
         
         # De-normalize the agent's action and update the network design
         q_matrix = (action.reshape(self.problem.n_hot, self.problem.n_cold)) * self.max_q_value
+        
+        # --- NEW: Check for forbidden matches before applying the action ---
+        hot_ids = self.problem.hot_streams[:, 0]
+        cold_ids = self.problem.cold_streams[:, 0]
+        for i in range(self.problem.n_hot):
+            for j in range(self.problem.n_cold):
+                if q_matrix[i, j] > self.tolerance:
+                    if (hot_ids[i], cold_ids[j]) in self.problem.forbidden_matches:
+                        return self._get_observation(), -1e7, True, False, self._get_info()
+        
         self.network_design[self.current_stage_idx] = q_matrix
 
         # Recalculate all temperatures based on the new design
@@ -330,54 +381,52 @@ class StageWiseHENGymEnv(gym.Env):
     
     def render(self, mode='human'):
         """Renders the current state or a final summary of the environment."""
-        if self.current_stage_idx >= self.num_stages:
-            head_str = "---       EPISODE FINISHED: FINAL NETWORK SUMMARY       ---"
-            print("\n" + "="*len(head_str))
-            print(head_str)
-            print("="*len(head_str))
-            
-            total_capex, opex = self._calculate_tac()
+        if mode == 'human':
+            if self.current_stage_idx >= self.num_stages:
+                head_str = "---       EPISODE FINISHED: FINAL NETWORK SUMMARY       ---"
+                print("\n" + "="*len(head_str))
+                print(head_str)
+                print("="*len(head_str))
+                
+                total_capex, opex = self._calculate_tac()
 
-            for k, q_matrix in enumerate(self.network_design):
-                print(f"\n--- Stage {k} Details ---")
-                
-                t_hot_in_s, t_hot_out_s = self.hot_temps_grid[:, k], self.hot_temps_grid[:, k+1]
-                t_cold_in_s, t_cold_out_s = self.cold_temps_grid[:, k+1], self.cold_temps_grid[:, k]
-                
-                print("Hot Streams:")
-                for i in range(self.problem.n_hot):
-                    print(f"  H{i}: Tin = {t_hot_in_s[i]:.2f}, Tout = {t_hot_out_s[i]:.2f}")
-                
-                print("Cold Streams:")
-                for j in range(self.problem.n_cold):
-                    print(f"  C{j}: Tin = {t_cold_in_s[j]:.2f}, Tout = {t_cold_out_s[j]:.2f}")
-                
-                print("Heat Exchangers (q_ij > 0):")
-                has_exchanger = False
-                for i in range(self.problem.n_hot):
+                for k, q_matrix in enumerate(self.network_design):
+                    print(f"\n--- Stage {k} Details ---")
+                    
+                    t_hot_in_s, t_hot_out_s = self.hot_temps_grid[:, k], self.hot_temps_grid[:, k+1]
+                    t_cold_in_s, t_cold_out_s = self.cold_temps_grid[:, k+1], self.cold_temps_grid[:, k]
+                    
+                    print("Hot Streams:")
+                    for i in range(self.problem.n_hot):
+                        print(f"  H{i}: Tin = {t_hot_in_s[i]:.2f}, Tout = {t_hot_out_s[i]:.2f}")
+                    
+                    print("Cold Streams:")
                     for j in range(self.problem.n_cold):
-                        if q_matrix[i,j] > self.tolerance:
-                            print(f"  - Match H{i}-C{j}: Heat Duty = {q_matrix[i,j]:.2f} kW")
-                            has_exchanger = True
-                if not has_exchanger: print("  - No exchangers in this stage.")
-            
-            print("\n" + "-"*50)
-            print("Final Cost Summary:")
-            print(f"  - Total Capital Cost (CAPEX): ${total_capex:,.2f}")
-            print(f"  - Total Operating Cost (OPEX): ${opex:,.2f}")
-            print(f"  - Total Annual Cost (TAC):    ${(total_capex + opex):,.2f}")
-            print("-"*50)
+                        print(f"  C{j}: Tin = {t_cold_in_s[j]:.2f}, Tout = {t_cold_out_s[j]:.2f}")
+                    
+                    print("Heat Exchangers (q_ij > 0):")
+                    has_exchanger = False
+                    for i in range(self.problem.n_hot):
+                        for j in range(self.problem.n_cold):
+                            if q_matrix[i,j] > self.tolerance:
+                                print(f"  - Match H{i}-C{j}: Heat Duty = {q_matrix[i,j]:.2f} kW")
+                                has_exchanger = True
+                    if not has_exchanger: print("  - No exchangers in this stage.")
+                
+                print("\n" + "-"*50)
+                print("Final Cost Summary:")
+                print(f"  - Total Capital Cost (CAPEX): ${total_capex:,.2f}")
+                print(f"  - Total Operating Cost (OPEX): ${opex:,.2f}")
+                print(f"  - Total Annual Cost (TAC):    ${(total_capex + opex):,.2f}")
+                print("-"*50)
 
+            else:
+                print(f"--- Stage {self.current_stage_idx} ---")
+                print("Inlet Hot Temps:", self.hot_temps_grid[:, self.current_stage_idx])
+                print("Inlet Cold Temps:", self.cold_temps_grid[:, self.current_stage_idx + 1])
         else:
-            print(f"--- Stage {self.current_stage_idx} ---")
-            print("Inlet Hot Temps:", self.hot_temps_grid[:, self.current_stage_idx])
-            print("Inlet Cold Temps:", self.cold_temps_grid[:, self.current_stage_idx + 1])
-
-# ==============================================================================
-#  Helper Functions
-# ==============================================================================
-def calculate_lmtd(dt1: float, dt2: float) -> float:
-    return (dt1 * dt2 * (dt1 + dt2) / 2.0)**(1/3.0)
+            raise NotImplementedError
+        
 
 # ==============================================================================
 #  Updated Function to Generate Dataset from Expert Solutions
@@ -407,7 +456,8 @@ def generate_dataset_from_json(json_filepath: str, output_path: str, verbose: bo
         env = StageWiseHENGymEnv(
             streams_filepath=prob_def['streams_filepath'],
             utilities_filepath=prob_def['utilities_filepath'],
-            matches_cost_filepath=prob_def['matches_cost_filepath'],
+            matches_cost_filepath=prob_def.get('matches_cost_filepath', None),
+            forbidden_matches_filepath=prob_def.get('forbidden_matches_filepath', None),
             num_stages=prob_def['num_stages'],
             min_deltaT=prob_def['min_deltaT'],
             **prob_def.get('cost_parameters', {})
@@ -476,7 +526,14 @@ if __name__ == '__main__':
     #     writer.writerow(['H1', 'C1', '1000', '1200', '0.6'])
     
     # --- Instantiate and test the new data-driven environment ---
-    env = StageWiseHENGymEnv("streams.csv", "utilities.csv", "matches_cost.csv", num_stages=3)
+    env = StageWiseHENGymEnv(
+                streams_filepath="data/example1/streams.csv",
+                utilities_filepath="data/example1/utilities.csv",
+                matches_cost_filepath="data/example1/matches_cost.csv",
+                forbidden_matches_filepath="data/example1/forbidden_matches.csv",
+                num_stages=3,
+                min_deltaT=10.0
+            )
     check_env(env)
     print("Environment check passed!")
     obs, _ = env.reset()
