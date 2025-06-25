@@ -50,11 +50,23 @@ class HENProblem:
         self.n_hot = len(self.hot_streams)
         self.n_cold = len(self.cold_streams)
         
-        self.total_hot_duty = (self.hot_streams[:, 1] - self.hot_streams[:, 2]) * self.hot_streams[:, 3]
-        self.total_cold_duty = (self.cold_streams[:, 2] - self.cold_streams[:, 1]) * self.cold_streams[:, 3]
+        self.hot_ids = [hs['name'] for hs in self.hot_streams]
+        self.hot_tin = [hs['tin'] for hs in self.hot_streams]
+        self.hot_tout = [hs['tout'] for hs in self.hot_streams]
+        self.hot_fcp = [hs['fcp'] for hs in self.hot_streams]
+        self.hot_h = [hs['h'] for hs in self.hot_streams]
+        
+        self.cold_ids = [cs['name'] for cs in self.cold_streams]
+        self.cold_tin = [cs['tin'] for cs in self.cold_streams]
+        self.cold_tout = [cs['tout'] for cs in self.cold_streams]
+        self.cold_fcp = [cs['fcp'] for cs in self.cold_streams]
+        self.cold_h = [cs['h'] for cs in self.cold_streams]
+        
+        self.total_hot_duty = [(hs['tin'] - hs['tout']) * hs['fcp'] for hs in self.hot_streams]
+        self.total_cold_duty = [(cs['tout'] - cs['tin']) * cs['fcp'] for cs in self.cold_streams]
         self.max_duty = max(np.max(self.total_hot_duty), np.max(self.total_cold_duty)) if self.n_hot > 0 and self.n_cold > 0 else 1.0
-        self.max_temp = np.max(self.hot_streams[:, 1]) if self.n_hot > 0 else 0
-        self.min_temp = np.min(self.cold_streams[:, 1]) if self.n_cold > 0 else 0
+        self.max_temp = np.max(self.hot_tin) if self.n_hot > 0 else 0
+        self.min_temp = np.min(self.cold_tin) if self.n_cold > 0 else 0
         self.temp_range = self.max_temp - self.min_temp if self.max_temp > self.min_temp else 1.0
         
     def _load_data_from_files(self):
@@ -64,7 +76,13 @@ class HENProblem:
         with open(self.streams_filepath, 'r', newline='') as f:
             reader = csv.DictReader(f)
             for row in reader:
-                stream_data = [row['Name'], float(row['Tin']), float(row['Tout']), float(row['Fcp']), float(row['h'])]
+                stream_data = {
+                    'name': row['Name'],
+                    'tin': float(row['Tin']),
+                    'tout': float(row['Tout']),
+                    'fcp': float(row['Fcp']),
+                    'h': float(row['h'])
+                    }
                 if row['Type'].lower() == 'hot': hot_streams_list.append(stream_data)
                 else: cold_streams_list.append(stream_data)
         self.hot_streams = np.array(hot_streams_list, dtype=object)
@@ -109,8 +127,8 @@ class HENProblem:
                     self.forbidden_matches.add((row['Hot_Stream'], row['Cold_Stream']))
         
         # --- Populate missing match combinations with default values ---
-        hot_stream_ids = self.hot_streams[:, 0]
-        cold_stream_ids = self.cold_streams[:, 0]
+        hot_stream_ids = [hs['name'] for hs in self.hot_streams]
+        cold_stream_ids = [cs['name'] for cs in self.cold_streams]
         hot_utility_ids = [hu['name'] for hu in self.hot_utilities]
         cold_utility_ids = [cu['name'] for cu in self.cold_utilities]
         
@@ -201,10 +219,8 @@ class StageWiseHENGymEnv(gym.Env):
         # Get remaining duties and normalize them
         final_hot_temps = self.hot_temps_grid[:, -1]
         final_cold_temps = self.cold_temps_grid[:, 0]
-        hot_fcp = self.problem.hot_streams[:, 2]
-        cold_fcp = self.problem.cold_streams[:, 2]
-        hot_duty_remaining = (final_hot_temps - self.problem.hot_streams[:, 1]) * hot_fcp
-        cold_duty_remaining = (self.problem.cold_streams[:, 1] - final_cold_temps) * cold_fcp
+        hot_duty_remaining = (final_hot_temps - self.problem.hot_tout) * self.problem.hot_fcp
+        cold_duty_remaining = (self.problem.cold_tout - final_cold_temps) * self.problem.cold_fcp
         
         norm_hot_duty_rem = hot_duty_remaining / (self.problem.max_duty + 1e-6)
         norm_cold_duty_rem = cold_duty_remaining / (self.problem.max_duty + 1e-6)
@@ -224,9 +240,8 @@ class StageWiseHENGymEnv(gym.Env):
         
         # --- NEW: Create and add forbidden match mask ---
         forbidden_mask = np.zeros((self.problem.n_hot, self.problem.n_cold))
-        hot_ids, cold_ids = self.problem.hot_streams[:, 0], self.problem.cold_streams[:, 0]
-        for i, h_id in enumerate(hot_ids):
-            for j, c_id in enumerate(cold_ids):
+        for i, h_id in enumerate(self.problem.hot_ids):
+            for j, c_id in enumerate(self.problem.cold_ids):
                 if (h_id, c_id) in self.problem.forbidden_matches:
                     forbidden_mask[i, j] = 1.0
         
@@ -247,98 +262,78 @@ class StageWiseHENGymEnv(gym.Env):
         return { "current_stage": self.current_stage_idx }
 
     def _calculate_tac(self):
-        """Helper to calculate the total CAPEX and OPEX for the current network design."""
         total_capex = 0
-        
-        hot_ids, cold_ids = self.problem.hot_streams[:, 0], self.problem.cold_streams[:, 0]
-        hot_fcp, cold_fcp = self.problem.hot_streams[:, 3], self.problem.cold_streams[:, 3]
-        hot_h, cold_h = self.problem.hot_streams[:, 4], self.problem.cold_streams[:, 4]
-        
-        # Calculate CAPEX by iterating through all placed exchangers
         for k, q_matrix in enumerate(self.network_design):
             t_hot_in, t_hot_out = self.hot_temps_grid[:, k], self.hot_temps_grid[:, k+1]
             t_cold_in, t_cold_out = self.cold_temps_grid[:, k+1], self.cold_temps_grid[:, k]
-            
             for i in range(self.problem.n_hot):
                 for j in range(self.problem.n_cold):
                     q_ij = q_matrix[i, j]
                     if q_ij > self.tolerance:
                         dT1, dT2 = t_hot_in[i] - t_cold_out[j], t_hot_out[i] - t_cold_in[j]
-                        if dT1 < self.min_deltaT - self.tolerance or dT2 < self.min_deltaT - self.tolerance:
-                            return float('inf'), float('inf')
-                        # --- UPDATE: Use data-driven U and cost params ---
-                        U = self.problem.get_u_value(hot_h[i], cold_h[j])
-                        cost_params = self.problem.get_cost_params(hot_ids[i], cold_ids[j])
-                        lmtd = calculate_lmtd(dT1, dT2) if dT1 * dT2 > 0 else 1e-6
+                        if dT1 < self.min_deltaT - self.tolerance or dT2 < self.min_deltaT - self.tolerance: return float('inf'), float('inf')
+                        U = self.problem.get_u_value(self.problem.hot_h[i], self.problem.cold_h[j])
+                        cost_params = self.problem.get_cost_params(self.problem.hot_ids[i], self.problem.cold_ids[j])
+                        lmtd = calculate_lmtd(dT1, dT2)
                         area = q_ij / (U * lmtd + 1e-6)
                         total_capex += (cost_params['fixed_cost'] + cost_params['area_coeff'] * (area ** cost_params['area_exp']))
         
-        # Calculate utility requirements and costs
         opex = 0.0
-        hot_fcp, cold_fcp = self.problem.hot_streams[:, 3], self.problem.cold_streams[:, 3]
         final_hot_temps, final_cold_temps = self.hot_temps_grid[:, -1], self.cold_temps_grid[:, 0]
         
-        # Cold utility for remaining hot stream duties
         for i in range(self.problem.n_hot):
-            duty_needed = (final_hot_temps[i] - self.problem.hot_streams[i, 2]) * hot_fcp[i]
+            utility_capex, utility_opex = 0.0, 0.0
+            duty_needed = (final_hot_temps[i] - self.problem.hot_tout[i]) * self.problem.hot_fcp[i]
             if duty_needed > self.tolerance:
                 best_utility_tac = float('inf')
                 for cu in self.problem.cold_utilities:
-                    dT1 = final_hot_temps[i] - cu['tout']
-                    dT2 = self.problem.hot_streams[i, 2] - cu['tin']
+                    if (self.problem.hot_ids[i], cu['name']) in self.problem.forbidden_matches: continue
+                    dT1, dT2 = final_hot_temps[i] - cu['tout'], self.problem.hot_tout[i] - cu['tin']
                     if dT1 >= self.min_deltaT and dT2 >= self.min_deltaT:
                         op_cost = cu['cost'] * duty_needed
                         lmtd = calculate_lmtd(dT1, dT2)
-                        U = self.problem.get_u_value(hot_h[i], cu['h'])
-                        cost_params = self.problem.get_cost_params(hot_ids[i], cu['name'])
+                        U = self.problem.get_u_value(self.problem.hot_h[i], cu['h'])
+                        cost_params = self.problem.get_cost_params(self.problem.hot_ids[i], cu['name'])
                         area = duty_needed / (U * lmtd + 1e-6)
                         capex_cost = cost_params['fixed_cost'] + cost_params['area_coeff'] * (area ** cost_params['area_exp'])
                         if capex_cost + op_cost < best_utility_tac:
                             best_utility_tac = capex_cost + op_cost
-                if best_utility_tac != float('inf'):
-                    total_capex += best_utility_tac - (cu['cost'] * duty_needed) # Add only the capex part
-                    opex += (cu['cost'] * duty_needed)
-                else: return float('inf'), float('inf') # No feasible utility
+                            utility_capex, utility_opex = capex_cost, op_cost
+                if best_utility_tac == float('inf'): return float('inf'), float('inf')
+                total_capex += utility_capex
+                opex += utility_opex
 
-        # Hot utility for remaining cold stream duties
         for j in range(self.problem.n_cold):
-            duty_needed = (self.problem.cold_streams[j, 2] - final_cold_temps[j]) * cold_fcp[j]
+            utility_capex, utility_opex = 0.0, 0.0
+            duty_needed = (self.problem.cold_tout[j] - final_cold_temps[j]) * self.problem.cold_fcp[j]
             if duty_needed > self.tolerance:
                 best_utility_tac = float('inf')
                 for hu in self.problem.hot_utilities:
-                    dT1 = hu['tin'] - self.problem.cold_streams[j, 2]
-                    dT2 = hu['tout'] - final_cold_temps[j]
+                    if (hu['name'], self.problem.cold_ids[j]) in self.problem.forbidden_matches: continue
+                    dT1, dT2 = hu['tin'] - self.problem.cold_tout[j], hu['tout'] - final_cold_temps[j]
                     if dT1 >= self.min_deltaT and dT2 >= self.min_deltaT:
                         op_cost = hu['cost'] * duty_needed
                         lmtd = calculate_lmtd(dT1, dT2)
-                        U = self.problem.get_u_value(hu['h'], cold_h[j])
-                        cost_params = self.problem.get_cost_params(hu['name'], cold_ids[j])
+                        U = self.problem.get_u_value(hu['h'], self.problem.cold_h[j])
+                        cost_params = self.problem.get_cost_params(hu['name'], self.problem.cold_ids[j])
                         area = duty_needed / (U * lmtd + 1e-6)
                         capex_cost = cost_params['fixed_cost'] + cost_params['area_coeff'] * (area ** cost_params['area_exp'])
                         if capex_cost + op_cost < best_utility_tac:
                             best_utility_tac = capex_cost + op_cost
-                if best_utility_tac != float('inf'):
-                    total_capex += best_utility_tac - (hu['cost'] * duty_needed)
-                    opex += (hu['cost'] * duty_needed)
-                else: return float('inf'), float('inf')
-        
+                            utility_capex, utility_opex = capex_cost, op_cost
+                if best_utility_tac == float('inf'): return float('inf'), float('inf')
+                total_capex += utility_capex
+                opex += utility_opex
         return total_capex, opex
 
     def _solve_temperature_grid(self):
         """Recalculates the entire temperature grid based on the current network design."""
-        self.hot_temps_grid[:, 0] = self.problem.hot_streams[:, 1]
-        self.cold_temps_grid[:, -1] = self.problem.cold_streams[:, 1]
-        
-        hot_fcp = self.problem.hot_streams[:, 3]
-        cold_fcp = self.problem.cold_streams[:, 3]
-        
+        self.hot_temps_grid[:, 0] = self.problem.hot_tin
+        self.cold_temps_grid[:, -1] = self.problem.cold_tin
         for k in range(self.num_stages):
-            q_out_hot = np.sum(self.network_design[k], axis=1)
-            self.hot_temps_grid[:, k + 1] = self.hot_temps_grid[:, k] - q_out_hot / hot_fcp
-        
+            self.hot_temps_grid[:, k + 1] = self.hot_temps_grid[:, k] - np.sum(self.network_design[k], axis=1) / self.problem.hot_fcp
         for k in range(self.num_stages - 1, -1, -1):
-            q_in_cold = np.sum(self.network_design[k], axis=0)
-            self.cold_temps_grid[:, k] = self.cold_temps_grid[:, k + 1] + q_in_cold / cold_fcp
+            self.cold_temps_grid[:, k] = self.cold_temps_grid[:, k + 1] + np.sum(self.network_design[k], axis=0) / self.problem.cold_fcp
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         """Processes the design for one stage."""
@@ -351,13 +346,10 @@ class StageWiseHENGymEnv(gym.Env):
         q_matrix = (action.reshape(self.problem.n_hot, self.problem.n_cold)) * self.max_q_value
         
         # --- NEW: Check for forbidden matches before applying the action ---
-        hot_ids = self.problem.hot_streams[:, 0]
-        cold_ids = self.problem.cold_streams[:, 0]
         for i in range(self.problem.n_hot):
             for j in range(self.problem.n_cold):
-                if q_matrix[i, j] > self.tolerance:
-                    if (hot_ids[i], cold_ids[j]) in self.problem.forbidden_matches:
-                        return self._get_observation(), -1e7, True, False, self._get_info()
+                if q_matrix[i, j] > self.tolerance and (self.problem.hot_ids[i], self.problem.cold_ids[j]) in self.problem.forbidden_matches:
+                    return self._get_observation(), -1e7, True, False, self._get_info()
         
         self.network_design[self.current_stage_idx] = q_matrix
 
