@@ -50,20 +50,21 @@ class HENProblem:
         self.n_hot = len(self.hot_streams)
         self.n_cold = len(self.cold_streams)
         
-        self.hot_ids = [hs['name'] for hs in self.hot_streams]
-        self.hot_tin = [hs['tin'] for hs in self.hot_streams]
-        self.hot_tout = [hs['tout'] for hs in self.hot_streams]
-        self.hot_fcp = [hs['fcp'] for hs in self.hot_streams]
-        self.hot_h = [hs['h'] for hs in self.hot_streams]
+        self.hot_ids = [s['name'] for s in self.hot_streams]
+        self.hot_tin = np.array([s['tin'] for s in self.hot_streams])
+        self.hot_tout = np.array([s['tout'] for s in self.hot_streams])
+        self.hot_fcp = np.array([s['fcp'] for s in self.hot_streams])
+        self.hot_h = np.array([s['h'] for s in self.hot_streams])
         
-        self.cold_ids = [cs['name'] for cs in self.cold_streams]
-        self.cold_tin = [cs['tin'] for cs in self.cold_streams]
-        self.cold_tout = [cs['tout'] for cs in self.cold_streams]
-        self.cold_fcp = [cs['fcp'] for cs in self.cold_streams]
-        self.cold_h = [cs['h'] for cs in self.cold_streams]
+        self.cold_ids = [s['name'] for s in self.cold_streams]
+        self.cold_tin = np.array([s['tin'] for s in self.cold_streams])
+        self.cold_tout = np.array([s['tout'] for s in self.cold_streams])
+        self.cold_fcp = np.array([s['fcp'] for s in self.cold_streams])
+        self.cold_h = np.array([s['h'] for s in self.cold_streams])
         
-        self.total_hot_duty = [(hs['tin'] - hs['tout']) * hs['fcp'] for hs in self.hot_streams]
-        self.total_cold_duty = [(cs['tout'] - cs['tin']) * cs['fcp'] for cs in self.cold_streams]
+        self.total_hot_duty = (self.hot_tin - self.hot_tout) * self.hot_fcp
+        self.total_cold_duty = (self.cold_tout - self.cold_tin) * self.cold_fcp
+        
         self.max_duty = max(np.max(self.total_hot_duty), np.max(self.total_cold_duty)) if self.n_hot > 0 and self.n_cold > 0 else 1.0
         self.max_temp = np.max(self.hot_tin) if self.n_hot > 0 else 0
         self.min_temp = np.min(self.cold_tin) if self.n_cold > 0 else 0
@@ -85,8 +86,8 @@ class HENProblem:
                     }
                 if row['Type'].lower() == 'hot': hot_streams_list.append(stream_data)
                 else: cold_streams_list.append(stream_data)
-        self.hot_streams = np.array(hot_streams_list, dtype=object)
-        self.cold_streams = np.array(cold_streams_list, dtype=object)
+        self.hot_streams = hot_streams_list
+        self.cold_streams = cold_streams_list
 
         # --- Load Utilities ---
         hot_utils_list, cold_utils_list = [], []
@@ -175,6 +176,7 @@ class StageWiseHENGymEnv(gym.Env):
         self.num_stages = num_stages
         self.min_deltaT = min_deltaT
         self.tolerance = 1e-3
+        self.small_number = 1e-6
 
         # --- UPDATE: Added forbidden match mask to observation size ---
         obs_size = (self.problem.n_hot + self.problem.n_cold) * 2 + \
@@ -199,7 +201,7 @@ class StageWiseHENGymEnv(gym.Env):
         self.cold_temps_grid = np.zeros((self.problem.n_cold, self.num_stages + 1))
         self._solve_temperature_grid()
         
-        _, opex = self._calculate_tac()
+        _, opex, _, _ = self._calculate_tac()
         
         self.initial_tac = opex
         self.current_stage_idx = 0
@@ -222,8 +224,8 @@ class StageWiseHENGymEnv(gym.Env):
         hot_duty_remaining = (final_hot_temps - self.problem.hot_tout) * self.problem.hot_fcp
         cold_duty_remaining = (self.problem.cold_tout - final_cold_temps) * self.problem.cold_fcp
         
-        norm_hot_duty_rem = hot_duty_remaining / (self.problem.max_duty + 1e-6)
-        norm_cold_duty_rem = cold_duty_remaining / (self.problem.max_duty + 1e-6)
+        norm_hot_duty_rem = hot_duty_remaining / (self.problem.max_duty + self.small_number)
+        norm_cold_duty_rem = cold_duty_remaining / (self.problem.max_duty + self.small_number)
         
         # Add feasible driving forces
         t_hot_in_stage = self.hot_temps_grid[:, obs_stage_idx]
@@ -231,7 +233,7 @@ class StageWiseHENGymEnv(gym.Env):
         hot_temps_matrix = t_hot_in_stage[:, np.newaxis]
         cold_temps_matrix = t_cold_in_stage[np.newaxis, :]
         feasible_driving_force = np.maximum(0, hot_temps_matrix - cold_temps_matrix - self.min_deltaT)
-        norm_driving_forces = feasible_driving_force / (self.problem.temp_range + 1e-6)
+        norm_driving_forces = feasible_driving_force / (self.problem.temp_range + self.small_number)
 
         # Get normalized time feature
         time_feature = np.array([self.current_stage_idx / self.num_stages])
@@ -271,20 +273,22 @@ class StageWiseHENGymEnv(gym.Env):
                     q_ij = q_matrix[i, j]
                     if q_ij > self.tolerance:
                         dT1, dT2 = t_hot_in[i] - t_cold_out[j], t_hot_out[i] - t_cold_in[j]
-                        if dT1 < self.min_deltaT - self.tolerance or dT2 < self.min_deltaT - self.tolerance: return float('inf'), float('inf')
+                        if dT1 < self.min_deltaT - self.tolerance or dT2 < self.min_deltaT - self.tolerance: return float('inf'), float('inf'), 0.0, 0.0
                         U = self.problem.get_u_value(self.problem.hot_h[i], self.problem.cold_h[j])
                         cost_params = self.problem.get_cost_params(self.problem.hot_ids[i], self.problem.cold_ids[j])
                         lmtd = calculate_lmtd(dT1, dT2)
-                        area = q_ij / (U * lmtd + 1e-6)
+                        area = q_ij / (U * lmtd + self.small_number)
                         total_capex += (cost_params['fixed_cost'] + cost_params['area_coeff'] * (area ** cost_params['area_exp']))
         
         opex = 0.0
         final_hot_temps, final_cold_temps = self.hot_temps_grid[:, -1], self.cold_temps_grid[:, 0]
         
+        total_cold_utility_needed = 0.0
         for i in range(self.problem.n_hot):
             utility_capex, utility_opex = 0.0, 0.0
             duty_needed = (final_hot_temps[i] - self.problem.hot_tout[i]) * self.problem.hot_fcp[i]
             if duty_needed > self.tolerance:
+                total_cold_utility_needed += duty_needed
                 best_utility_tac = float('inf')
                 for cu in self.problem.cold_utilities:
                     if (self.problem.hot_ids[i], cu['name']) in self.problem.forbidden_matches: continue
@@ -294,19 +298,21 @@ class StageWiseHENGymEnv(gym.Env):
                         lmtd = calculate_lmtd(dT1, dT2)
                         U = self.problem.get_u_value(self.problem.hot_h[i], cu['h'])
                         cost_params = self.problem.get_cost_params(self.problem.hot_ids[i], cu['name'])
-                        area = duty_needed / (U * lmtd + 1e-6)
+                        area = duty_needed / (U * lmtd + self.small_number)
                         capex_cost = cost_params['fixed_cost'] + cost_params['area_coeff'] * (area ** cost_params['area_exp'])
                         if capex_cost + op_cost < best_utility_tac:
                             best_utility_tac = capex_cost + op_cost
                             utility_capex, utility_opex = capex_cost, op_cost
-                if best_utility_tac == float('inf'): return float('inf'), float('inf')
+                if best_utility_tac == float('inf'): return float('inf'), float('inf'), 0.0, 0.0
                 total_capex += utility_capex
                 opex += utility_opex
 
+        total_hot_utility_needed = 0.0
         for j in range(self.problem.n_cold):
             utility_capex, utility_opex = 0.0, 0.0
             duty_needed = (self.problem.cold_tout[j] - final_cold_temps[j]) * self.problem.cold_fcp[j]
             if duty_needed > self.tolerance:
+                total_hot_utility_needed += duty_needed
                 best_utility_tac = float('inf')
                 for hu in self.problem.hot_utilities:
                     if (hu['name'], self.problem.cold_ids[j]) in self.problem.forbidden_matches: continue
@@ -316,15 +322,17 @@ class StageWiseHENGymEnv(gym.Env):
                         lmtd = calculate_lmtd(dT1, dT2)
                         U = self.problem.get_u_value(hu['h'], self.problem.cold_h[j])
                         cost_params = self.problem.get_cost_params(hu['name'], self.problem.cold_ids[j])
-                        area = duty_needed / (U * lmtd + 1e-6)
+                        area = duty_needed / (U * lmtd + self.small_number)
                         capex_cost = cost_params['fixed_cost'] + cost_params['area_coeff'] * (area ** cost_params['area_exp'])
                         if capex_cost + op_cost < best_utility_tac:
                             best_utility_tac = capex_cost + op_cost
                             utility_capex, utility_opex = capex_cost, op_cost
-                if best_utility_tac == float('inf'): return float('inf'), float('inf')
+                if best_utility_tac == float('inf'): return float('inf'), float('inf'), 0.0, 0.0
                 total_capex += utility_capex
                 opex += utility_opex
-        return total_capex, opex
+        
+        # --- Return all capital and operating cost ---
+        return total_capex, opex, total_hot_utility_needed, total_cold_utility_needed
 
     def _solve_temperature_grid(self):
         """Recalculates the entire temperature grid based on the current network design."""
@@ -339,10 +347,10 @@ class StageWiseHENGymEnv(gym.Env):
         """Processes the design for one stage."""
         
         # --- FIX: Calculate TAC based on the state *before* this action ---
-        capex_before, opex_before = self._calculate_tac()
+        capex_before, opex_before, _, _= self._calculate_tac()
         tac_before = capex_before + opex_before
         
-        # De-normalize the agent's action and update the network design
+        # --- De-normalize the agent's action and update the network design ---
         q_matrix = (action.reshape(self.problem.n_hot, self.problem.n_cold)) * self.max_q_value
         
         # --- NEW: Check for forbidden matches before applying the action ---
@@ -351,23 +359,33 @@ class StageWiseHENGymEnv(gym.Env):
                 if q_matrix[i, j] > self.tolerance and (self.problem.hot_ids[i], self.problem.cold_ids[j]) in self.problem.forbidden_matches:
                     return self._get_observation(), -1e7, True, False, self._get_info()
         
+        # --- Apply the action to the network design ---
         self.network_design[self.current_stage_idx] = q_matrix
 
-        # Recalculate all temperatures based on the new design
+        # --- Recalculate all temperatures based on the new design ---
         self._solve_temperature_grid()
 
         # --- FIX: Re-validate the entire network for thermodynamic feasibility ---
-        capex_after, opex_after = self._calculate_tac()
+        capex_after, opex_after, _, _ = self._calculate_tac()
         tac_after = capex_after + opex_after
 
         if tac_after == float('inf'): # Check if the network is now infeasible
             return self._get_observation(), -10.0, True, False, self._get_info()
 
         # The reward is the reduction in total annual cost
-        reward = (tac_before - tac_after) / (self.initial_tac + 1e-6) if self.initial_tac > 0 else 0
+        reward = (tac_before - tac_after) / (self.initial_tac + self.small_number) if self.initial_tac > 0 else 0
         
+        # --- NEW: Early termination logic ---
         self.current_stage_idx += 1
-        done = self.current_stage_idx >= self.num_stages
+        base_done = self.current_stage_idx >= self.num_stages
+        
+        final_hot_temps = self.hot_temps_grid[:, -1]
+        final_cold_temps = self.cold_temps_grid[:, 0]
+        hot_done = np.all(final_hot_temps <= self.problem.hot_tout + self.tolerance)
+        cold_done = np.all(final_cold_temps >= self.problem.cold_tout - self.tolerance)
+        early_done = hot_done and cold_done
+        
+        done = base_done or early_done
             
         return self._get_observation(), reward, done, False, self._get_info()
     
@@ -380,7 +398,7 @@ class StageWiseHENGymEnv(gym.Env):
                 print(head_str)
                 print("="*len(head_str))
                 
-                total_capex, opex = self._calculate_tac()
+                total_capex, opex, hot_utility_needed, cold_utility_needed = self._calculate_tac()
 
                 for k, q_matrix in enumerate(self.network_design):
                     print(f"\n--- Stage {k} Details ---")
@@ -407,6 +425,9 @@ class StageWiseHENGymEnv(gym.Env):
                 
                 print("\n" + "-"*50)
                 print("Final Cost Summary:")
+                # --- UPDATE: Added utility usage to the summary ---
+                print(f"  - Hot Utility Usage:      {hot_utility_needed:,.2f}")
+                print(f"  - Cold Utility Usage:     {cold_utility_needed:,.2f}")
                 print(f"  - Total Capital Cost (CAPEX): ${total_capex:,.2f}")
                 print(f"  - Total Operating Cost (OPEX): ${opex:,.2f}")
                 print(f"  - Total Annual Cost (TAC):    ${(total_capex + opex):,.2f}")
@@ -418,7 +439,6 @@ class StageWiseHENGymEnv(gym.Env):
                 print("Inlet Cold Temps:", self.cold_temps_grid[:, self.current_stage_idx + 1])
         else:
             raise NotImplementedError
-        
 
 # ==============================================================================
 #  Updated Function to Generate Dataset from Expert Solutions
@@ -496,26 +516,12 @@ def generate_dataset_from_json(json_filepath: str, output_path: str, verbose: bo
     print(f"Dataset saved to '{output_path}'")
     
 
-if __name__ == '__main__':
+# ==============================================================================
+#  main Function to test the GymEnv
+# ==============================================================================
+def main():
     # --- Create Dummy CSV files for demonstration ---
     from stable_baselines3.common.env_checker import check_env
-    
-    # with open('streams.csv', 'w', newline='') as f:
-    #     writer = csv.writer(f)
-    #     writer.writerow(['Name', 'Type', 'Tin', 'Tout', 'Fcp', 'h'])
-    #     writer.writerow(['H1', 'Hot', '443', '333', '30', '0.8'])
-    #     writer.writerow(['H2', 'Hot', '423', '303', '15', '0.7'])
-    #     writer.writerow(['C1', 'Cold', '293', '408', '20', '0.6'])
-    #     writer.writerow(['C2', 'Cold', '353', '413', '40', '0.5'])
-    # with open('utilities.csv', 'w', newline='') as f:
-    #     writer = csv.writer(f)
-    #     writer.writerow(['Name', 'Type', 'Tin', 'Tout', 'Cost', 'h'])
-    #     writer.writerow(['W1', 'Cold', '293', '333', '80', '1.0'])
-    #     writer.writerow(['S1', 'Hot', '450', '449', '120', '1.2'])
-    # with open('matches_cost.csv', 'w', newline='') as f:
-    #     writer = csv.writer(f)
-    #     writer.writerow(['Hot_Stream', 'Cold_Stream', 'Fixed_Cost_Unit', 'Area_Cost_Coeff', 'Area_Cost_Exp'])
-    #     writer.writerow(['H1', 'C1', '1000', '1200', '0.6'])
     
     # --- Instantiate and test the new data-driven environment ---
     env = StageWiseHENGymEnv(
@@ -571,3 +577,7 @@ if __name__ == '__main__':
     # --- FIX: Corrected syntax error in print statement ---
     print("After action 2:", obs)
     env.render()
+
+if __name__ == '__main__':
+    main()
+    
