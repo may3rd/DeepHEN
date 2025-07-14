@@ -1,6 +1,7 @@
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
+import pandas as pd
 from typing import List, Dict, Tuple, Any, Optional
 import json
 import os
@@ -13,19 +14,80 @@ def calculate_lmtd(dt1: float, dt2: float) -> float:
     return (dt1 * dt2 * (dt1 + dt2) / 2.0)**(1/3.0)
 
 # ==============================================================================
-#  Updated HENProblem Class with Data Loading from CSV
+#  Updated HENProblem Class with Pandas and Validation
 # ==============================================================================
 class HENProblem:
     """
-    Data class for HEN problem definition.
-    This version loads all stream, utility, and cost data from external CSV files.
+    Data class for Heat Exchanger Network (HEN) problem definition.
+    Loads stream, utility, match-specific cost, and forbidden match data from CSV files
+    using pandas for efficient parsing. Includes comprehensive input validation and
+    detailed documentation for CSV file formats.
+
+    Attributes:
+        streams_filepath (str): Path to the CSV file containing stream data.
+        utilities_filepath (str): Path to the CSV file containing utility data.
+        matches_cost_filepath (Optional[str]): Path to the CSV file with match-specific cost data.
+        forbidden_matches_filepath (Optional[str]): Path to the CSV file with forbidden matches.
+        default_u (float): Default overall heat transfer coefficient (kW/m²K).
+        default_cost_params (dict): Default cost parameters for matches.
+        hot_streams (List[Dict]): List of hot stream data dictionaries.
+        cold_streams (List[Dict]): List of cold stream data dictionaries.
+        hot_utilities (List[Dict]): List of hot utility data dictionaries.
+        cold_utilities (List[Dict]): List of cold utility data dictionaries.
+        match_costs (Dict[Tuple[str, str], Dict]): Match-specific cost parameters.
+        forbidden_matches (Set[Tuple[str, str]]): Set of forbidden (hot, cold) stream pairs.
+        n_hot (int): Number of hot streams.
+        n_cold (int): Number of cold streams.
+        hot_ids (List[str]): List of hot stream names.
+        cold_ids (List[str]): List of cold stream names.
+        hot_tin (np.ndarray): Inlet temperatures of hot streams (°C).
+        hot_tout (np.ndarray): Outlet temperatures of hot streams (°C).
+        hot_fcp (np.ndarray): Heat capacity flow rates of hot streams (kW/°C).
+        hot_h (np.ndarray): Heat transfer coefficients of hot streams (kW/m²K).
+        cold_tin (np.ndarray): Inlet temperatures of cold streams (°C).
+        cold_tout (np.ndarray): Outlet temperatures of cold streams (°C).
+        cold_fcp (np.ndarray): Heat capacity flow rates of cold streams (kW/°C).
+        cold_h (np.ndarray): Heat transfer coefficients of cold streams (kW/m²K).
+        total_hot_duty (np.ndarray): Total heat duties of hot streams (kW).
+        total_cold_duty (np.ndarray): Total heat duties of cold streams (kW).
+        max_duty (float): Maximum duty across all streams (kW).
+        max_temp (float): Maximum temperature across all streams (°C).
+        min_temp (float): Minimum temperature across all streams (°C).
+        temp_range (float): Temperature range (max_temp - min_temp) (°C).
+
+    Expected CSV File Formats:
+        - streams.csv:
+            Columns: Name (str), Type (str, 'hot' or 'cold'), Tin (float, °C), Tout (float, °C),
+                     Fcp (float, kW/°C), h (float, kW/m²K)
+            Example:
+                Name,Type,Tin,Tout,Fcp,h
+                H1,hot,300.0,100.0,10.0,0.5
+                C1,cold,50.0,200.0,15.0,0.6
+        - utilities.csv:
+            Columns: Name (str), Type (str, 'hot' or 'cold'), Tin (float, °C), Tout (float, °C),
+                     Cost (float, $/kW), h (float, kW/m²K)
+            Example:
+                Name,Type,Tin,Tout,Cost,h
+                HU1,hot,400.0,350.0,100.0,0.8
+                CU1,cold,20.0,30.0,10.0,0.7
+        - matches_cost.csv (optional):
+            Columns: Hot_Stream (str), Cold_Stream (str), Fixed_Cost_Unit (float, $),
+                     Area_Cost_Coeff (float, $/m²), Area_Cost_Exp (float)
+            Example:
+                Hot_Stream,Cold_Stream,Fixed_Cost_Unit,Area_Cost_Coeff,Area_Cost_Exp
+                H1,C1,5000.0,1000.0,0.6
+        - forbidden_matches.csv (optional):
+            Columns: Hot_Stream (str), Cold_Stream (str)
+            Example:
+                Hot_Stream,Cold_Stream
+                H1,C2
     """
     def __init__(
         self, 
         streams_filepath: str,
         utilities_filepath: str,
         matches_cost_filepath: Optional[str] = None,
-        forbidden_matches_filepath: Optional[str] = None, # <-- NEW
+        forbidden_matches_filepath: Optional[str] = None,
         default_u: float = 0.8,
         default_fixed_cost: float = 0.0,
         default_area_coeff: float = 1000.0,
@@ -35,7 +97,7 @@ class HENProblem:
         self.streams_filepath = streams_filepath
         self.utilities_filepath = utilities_filepath
         self.matches_cost_filepath = matches_cost_filepath
-        self.forbidden_matches_filepath = forbidden_matches_filepath # <-- NEW
+        self.forbidden_matches_filepath = forbidden_matches_filepath
         
         # Default values
         self.default_u = default_u
@@ -51,16 +113,16 @@ class HENProblem:
         self.n_cold = len(self.cold_streams)
         
         self.hot_ids = [s['name'] for s in self.hot_streams]
-        self.hot_tin = np.array([s['tin'] for s in self.hot_streams])
-        self.hot_tout = np.array([s['tout'] for s in self.hot_streams])
-        self.hot_fcp = np.array([s['fcp'] for s in self.hot_streams])
-        self.hot_h = np.array([s['h'] for s in self.hot_streams])
+        self.hot_tin = np.array([s['tin'] for s in self.hot_streams], dtype=np.float32)
+        self.hot_tout = np.array([s['tout'] for s in self.hot_streams], dtype=np.float32)
+        self.hot_fcp = np.array([s['fcp'] for s in self.hot_streams], dtype=np.float32)
+        self.hot_h = np.array([s['h'] for s in self.hot_streams], dtype=np.float32)
         
         self.cold_ids = [s['name'] for s in self.cold_streams]
-        self.cold_tin = np.array([s['tin'] for s in self.cold_streams])
-        self.cold_tout = np.array([s['tout'] for s in self.cold_streams])
-        self.cold_fcp = np.array([s['fcp'] for s in self.cold_streams])
-        self.cold_h = np.array([s['h'] for s in self.cold_streams])
+        self.cold_tin = np.array([s['tin'] for s in self.cold_streams], dtype=np.float32)
+        self.cold_tout = np.array([s['tout'] for s in self.cold_streams], dtype=np.float32)
+        self.cold_fcp = np.array([s['fcp'] for s in self.cold_streams], dtype=np.float32)
+        self.cold_h = np.array([s['h'] for s in self.cold_streams], dtype=np.float32)
         
         self.total_hot_duty = (self.hot_tin - self.hot_tout) * self.hot_fcp
         self.total_cold_duty = (self.cold_tout - self.cold_tin) * self.cold_fcp
@@ -69,64 +131,150 @@ class HENProblem:
         self.max_temp = np.max(self.hot_tin) if self.n_hot > 0 else 0
         self.min_temp = np.min(self.cold_tin) if self.n_cold > 0 else 0
         self.temp_range = self.max_temp - self.min_temp if self.max_temp > self.min_temp else 1.0
-        
+
+    def _validate_csv_file(self, filepath: str, required_columns: List[str], numeric_columns: List[str]) -> pd.DataFrame:
+        """
+        Validates a CSV file and loads it into a pandas DataFrame.
+
+        Args:
+            filepath (str): Path to the CSV file.
+            required_columns (List[str]): List of required column names.
+            numeric_columns (List[str]): List of columns that must be numeric.
+
+        Returns:
+            pd.DataFrame: Validated DataFrame.
+
+        Raises:
+            FileNotFoundError: If the file does not exist.
+            ValueError: If required columns are missing or numeric columns are invalid.
+        """
+        if not os.path.exists(filepath):
+            raise FileNotFoundError(f"CSV file not found: {filepath}")
+
+        try:
+            df = pd.read_csv(filepath, dtype={col: float for col in numeric_columns}, keep_default_na=False)
+        except Exception as e:
+            raise ValueError(f"Failed to read CSV file {filepath}: {str(e)}")
+
+        # Check for required columns
+        missing_cols = [col for col in required_columns if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"Missing required columns in {filepath}: {missing_cols}")
+
+        # Validate numeric columns
+        for col in numeric_columns:
+            if not pd.api.types.is_numeric_dtype(df[col]):
+                raise ValueError(f"Column {col} in {filepath} must be numeric")
+            if df[col].isna().any():
+                raise ValueError(f"Column {col} in {filepath} contains missing or invalid values")
+
+        # Check for empty DataFrame
+        if df.empty:
+            raise ValueError(f"CSV file {filepath} is empty")
+
+        return df
+
     def _load_data_from_files(self):
-        """Parses all required CSV files and ensures all possible matches have cost data."""
-        # --- Load Streams ---
-        hot_streams_list, cold_streams_list = [], []
-        with open(self.streams_filepath, 'r', newline='') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                stream_data = {
-                    'name': row['Name'],
-                    'tin': float(row['Tin']),
-                    'tout': float(row['Tout']),
-                    'fcp': float(row['Fcp']),
-                    'h': float(row['h'])
-                    }
-                if row['Type'].lower() == 'hot': hot_streams_list.append(stream_data)
-                else: cold_streams_list.append(stream_data)
-        self.hot_streams = hot_streams_list
-        self.cold_streams = cold_streams_list
+        """
+        Loads and validates stream, utility, cost, and forbidden match data from CSV files
+        using pandas for efficient parsing. Populates missing match costs with defaults.
 
-        # --- Load Utilities ---
-        hot_utils_list, cold_utils_list = [], []
-        with open(self.utilities_filepath, 'r') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                util_data = {
-                    'name': row['Name'],
-                    'tin': float(row['Tin']),
-                    'tout': float(row['Tout']),
-                    'cost': float(row['Cost']),
-                    'h': float(row['h'])
-                    }
-                if row['Type'].lower() == 'hot': hot_utils_list.append(util_data)
-                else: cold_utils_list.append(util_data)
-        self.hot_utilities = hot_utils_list
-        self.cold_utilities = cold_utils_list
+        Raises:
+            ValueError: If data validation fails or thermodynamic constraints are violated.
+        """
+        # --- Load and Validate Streams ---
+        stream_cols = ['Name', 'Type', 'Tin', 'Tout', 'Fcp', 'h']
+        stream_numeric_cols = ['Tin', 'Tout', 'Fcp', 'h']
+        streams_df = self._validate_csv_file(self.streams_filepath, stream_cols, stream_numeric_cols)
 
-        # --- Load Match-Specific Costs ---
+        # Validate stream types and thermodynamics
+        streams_df['Type'] = streams_df['Type'].str.lower()
+        if not all(streams_df['Type'].isin(['hot', 'cold'])):
+            raise ValueError(f"Invalid stream type in {self.streams_filepath}. Must be 'hot' or 'cold'")
+
+        hot_streams_df = streams_df[streams_df['Type'] == 'hot']
+        cold_streams_df = streams_df[streams_df['Type'] == 'cold']
+
+        # Check thermodynamic consistency
+        if (hot_streams_df['Tin'] < hot_streams_df['Tout']).any():
+            raise ValueError(f"Hot streams in {self.streams_filepath} must have Tin >= Tout")
+        if (cold_streams_df['Tin'] > cold_streams_df['Tout']).any():
+            raise ValueError(f"Cold streams in {self.streams_filepath} must have Tin <= Tout")
+        if (streams_df['Fcp'] <= 0).any():
+            raise ValueError(f"Fcp in {self.streams_filepath} must be positive")
+        if (streams_df['h'] <= 0).any():
+            raise ValueError(f"h in {self.streams_filepath} must be positive")
+        if streams_df['Name'].duplicated().any():
+            raise ValueError(f"Duplicate stream names in {self.streams_filepath}")
+
+        self.hot_streams = hot_streams_df[['Name', 'Tin', 'Tout', 'Fcp', 'h']].rename(
+            columns={'Name': 'name', 'Tin': 'tin', 'Tout': 'tout', 'Fcp': 'fcp'}).to_dict('records')
+        self.cold_streams = cold_streams_df[['Name', 'Tin', 'Tout', 'Fcp', 'h']].rename(
+            columns={'Name': 'name', 'Tin': 'tin', 'Tout': 'tout', 'Fcp': 'fcp'}).to_dict('records')
+
+        # --- Load and Validate Utilities ---
+        util_cols = ['Name', 'Type', 'Tin', 'Tout', 'Cost', 'h']
+        util_numeric_cols = ['Tin', 'Tout', 'Cost', 'h']
+        utils_df = self._validate_csv_file(self.utilities_filepath, util_cols, util_numeric_cols)
+
+        # Validate utility types and data
+        utils_df['Type'] = utils_df['Type'].str.lower()
+        if not all(utils_df['Type'].isin(['hot', 'cold'])):
+            raise ValueError(f"Invalid utility type in {self.utilities_filepath}. Must be 'hot' or 'cold'")
+        if (utils_df['Cost'] < 0).any():
+            raise ValueError(f"Cost in {self.utilities_filepath} must be non-negative")
+        if (utils_df['h'] <= 0).any():
+            raise ValueError(f"h in {self.utilities_filepath} must be positive")
+        if utils_df['Name'].duplicated().any():
+            raise ValueError(f"Duplicate utility names in {self.utilities_filepath}")
+
+        hot_utils_df = utils_df[utils_df['Type'] == 'hot']
+        cold_utils_df = utils_df[utils_df['Type'] == 'cold']
+        self.hot_utilities = hot_utils_df[['Name', 'Tin', 'Tout', 'Cost', 'h']].rename(
+            columns={'Name': 'name', 'Tin': 'tin', 'Tout': 'tout', 'Cost': 'cost'}).to_dict('records')
+        self.cold_utilities = cold_utils_df[['Name', 'Tin', 'Tout', 'Cost', 'h']].rename(
+            columns={'Name': 'name', 'Tin': 'tin', 'Tout': 'tout', 'Cost': 'cost'}).to_dict('records')
+
+        # --- Load and Validate Match-Specific Costs ---
         self.match_costs = {}
         if self.matches_cost_filepath and os.path.exists(self.matches_cost_filepath):
-            with open(self.matches_cost_filepath, 'r') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    key = (row['Hot_Stream'], row['Cold_Stream'])
-                    self.match_costs[key] = {
-                        'fixed_cost': float(row['Fixed_Cost_Unit']),
-                        'area_coeff': float(row['Area_Cost_Coeff']),
-                        'area_exp': float(row['Area_Cost_Exp'])
-                        }
-        
-        # --- NEW: Load Forbidden Matches ---
+            cost_cols = ['Hot_Stream', 'Cold_Stream', 'Fixed_Cost_Unit', 'Area_Cost_Coeff', 'Area_Cost_Exp']
+            cost_numeric_cols = ['Fixed_Cost_Unit', 'Area_Cost_Coeff', 'Area_Cost_Exp']
+            costs_df = self._validate_csv_file(self.matches_cost_filepath, cost_cols, cost_numeric_cols)
+
+            # Validate cost parameters
+            if (costs_df['Fixed_Cost_Unit'] < 0).any() or (costs_df['Area_Cost_Coeff'] < 0).any():
+                raise ValueError(f"Cost parameters in {self.matches_cost_filepath} must be non-negative")
+            if (costs_df['Area_Cost_Exp'] <= 0).any():
+                raise ValueError(f"Area_Cost_Exp in {self.matches_cost_filepath} must be positive")
+
+            for _, row in costs_df.iterrows():
+                key = (row['Hot_Stream'], row['Cold_Stream'])
+                self.match_costs[key] = {
+                    'fixed_cost': float(row['Fixed_Cost_Unit']),
+                    'area_coeff': float(row['Area_Cost_Coeff']),
+                    'area_exp': float(row['Area_Cost_Exp'])
+                }
+
+        # --- Load and Validate Forbidden Matches ---
         self.forbidden_matches = set()
         if self.forbidden_matches_filepath and os.path.exists(self.forbidden_matches_filepath):
-            with open(self.forbidden_matches_filepath, 'r', newline='') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    self.forbidden_matches.add((row['Hot_Stream'], row['Cold_Stream']))
-        
+            forbidden_cols = ['Hot_Stream', 'Cold_Stream']
+            forbidden_df = self._validate_csv_file(self.forbidden_matches_filepath, forbidden_cols, [])
+
+            for _, row in forbidden_df.iterrows():
+                self.forbidden_matches.add((row['Hot_Stream'], row['Cold_Stream']))
+
+        # --- Validate stream and utility names in match costs and forbidden matches ---
+        valid_hot_ids = set([s['name'] for s in self.hot_streams] + [u['name'] for u in self.hot_utilities])
+        valid_cold_ids = set([s['name'] for s in self.cold_streams] + [u['name'] for u in self.cold_utilities])
+        for hot_id, cold_id in self.match_costs.keys():
+            if hot_id not in valid_hot_ids or cold_id not in valid_cold_ids:
+                raise ValueError(f"Invalid stream/utility names in {self.matches_cost_filepath}: ({hot_id}, {cold_id})")
+        for hot_id, cold_id in self.forbidden_matches:
+            if hot_id not in valid_hot_ids or cold_id not in valid_cold_ids:
+                raise ValueError(f"Invalid stream/utility names in {self.forbidden_matches_filepath}: ({hot_id}, {cold_id})")
+
         # --- Populate missing match combinations with default values ---
         hot_stream_ids = [hs['name'] for hs in self.hot_streams]
         cold_stream_ids = [cs['name'] for cs in self.cold_streams]
@@ -134,20 +282,40 @@ class HENProblem:
         cold_utility_ids = [cu['name'] for cu in self.cold_utilities]
         
         for h_id in hot_stream_ids:
+            for c_id in cold_stream_ids + cold_utility_ids:
+                if (h_id, c_id) not in self.match_costs:
+                    self.match_costs[(h_id, c_id)] = self.default_cost_params
+        for h_id in hot_utility_ids:
             for c_id in cold_stream_ids:
-                if (h_id, c_id) not in self.match_costs: self.match_costs[(h_id, c_id)] = self.default_cost_params
-        for h_id in hot_stream_ids:
-            for cu_id in cold_utility_ids:
-                if (h_id, cu_id) not in self.match_costs: self.match_costs[(h_id, cu_id)] = self.default_cost_params
-        for hu_id in hot_utility_ids:
-            for c_id in cold_stream_ids:
-                if (hu_id, c_id) not in self.match_costs: self.match_costs[(hu_id, c_id)] = self.default_cost_params
+                if (h_id, c_id) not in self.match_costs:
+                    self.match_costs[(h_id, c_id)] = self.default_cost_params
 
     def get_cost_params(self, hot_id: str, cold_id: str) -> dict:
+        """
+        Retrieves cost parameters for a given hot-cold stream match.
+
+        Args:
+            hot_id (str): Name of the hot stream or utility.
+            cold_id (str): Name of the cold stream or utility.
+
+        Returns:
+            dict: Cost parameters (fixed_cost, area_coeff, area_exp).
+        """
         return self.match_costs.get((hot_id, cold_id), self.default_cost_params)
 
     def get_u_value(self, h_hot: float, h_cold: float) -> float:
-        if h_hot <= 0 or h_cold <= 0: return self.default_u
+        """
+        Calculates the overall heat transfer coefficient for a match.
+
+        Args:
+            h_hot (float): Heat transfer coefficient of the hot stream (kW/m²K).
+            h_cold (float): Heat transfer coefficient of the cold stream (kW/m²K).
+
+        Returns:
+            float: Overall heat transfer coefficient (kW/m²K).
+        """
+        if h_hot <= 0 or h_cold <= 0:
+            return self.default_u
         return (1/h_hot + 1/h_cold)**-1
 
 
